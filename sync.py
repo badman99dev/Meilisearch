@@ -5,43 +5,79 @@ import os
 import time
 from datetime import date, datetime
 
-def sync_database():
-    print("\n🚀 Auto-Sync Script Started...")
-    MEILI_URL = "http://localhost:7700"
-    MASTER_KEY = os.getenv('MEILI_MASTER_KEY')
-    headers = {'Authorization': f'Bearer {MASTER_KEY}', 'Content-Type': 'application/json'}
-    
-    # 1. Meilisearch के लिए थोड़ा इंतज़ार (ताकि सर्वर रेडी हो जाए)
-    time.sleep(5) 
+# --- GLOBAL CONFIGURATION ---
+MEILI_URL = "http://localhost:7700"
+MASTER_KEY = os.getenv('MEILI_MASTER_KEY')
+HEADERS = {'Authorization': f'Bearer {MASTER_KEY}', 'Content-Type': 'application/json'}
 
-    print("🔄 Connecting to TiDB to fetch latest data...")
+def update_meilisearch_settings():
+    """Meilisearch की सेटिंग्स को Google/Netflix लेवल पर सेट करना (सिर्फ एक बार चलेगा)"""
+    print("⚙️ Applying Enterprise-Grade Settings to Meilisearch...")
+    
+    settings = {
+        # 1. सर्च के लिए (प्राथमिकता के अनुसार)
+        "searchableAttributes": [
+            "title", "original_title", "categories", "director", "cast", "tagline", "description", "slug"
+        ],
+        
+        # 2. फिल्टर करने के लिए
+        "filterableAttributes": [
+            "categories", "release_year", "rating", "language", "audio_label", 
+            "quality_label", "is_series", "status", "country", "is_featured"
+        ],
+        
+        # 3. सॉर्ट करने के लिए
+        "sortableAttributes": [
+            "release_year", "rating", "views", "downloads", "created_at", "vote_count"
+        ],
+        
+        # 4. रैंकिंग का नियम (सॉर्ट को एहमियत दी गई है)
+        "rankingRules": [
+            "words", "typo", "proximity", "attribute", "sort", "exactness"
+        ],
+        
+        # 5. Typo Tolerance (स्पेलिंग की गलतियां माफ़ करना)
+        "typoTolerance": {
+            "enabled": True,
+            "minWordSizeForTypos": { "oneTypo": 5, "twoTypos": 9 },
+            "disableOnAttributes": ["slug"] # Slug पर स्पेलिंग मिस्टेक अलाउड नहीं
+        },
+        
+        # 6. Pagination Limit (तुम्हारी 13k+ मूवीज़ के लिए बहुत ज़रूरी)
+        "pagination": {
+            "maxTotalHits": 20000
+        }
+    }
+    
+    try:
+        res = requests.patch(f"{MEILI_URL}/indexes/movies/settings", headers=HEADERS, json=settings)
+        if res.status_code in [200, 202]:
+            print("✅ Settings applied successfully!")
+        else:
+            print(f"⚠️ Settings update issue: {res.text}")
+    except Exception as e:
+        print(f"⚠️ Failed to reach Meilisearch for settings: {e}")
+
+def sync_database():
+    """TiDB से डेटा निकालकर Meilisearch में डालना (हर 2 घंटे में चलेगा)"""
+    print(f"\n🔄 Sync Cycle Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    print("🔌 Connecting to TiDB Database...")
     try:
         db = mysql.connector.connect(
             host=os.getenv('DB_HOST'),
             user=os.getenv('DB_USER'),
             password=os.getenv('DB_PASS'),
             database=os.getenv('DB_NAME'),
-            port=int(os.getenv('DB_PORT', 4000))
+            port=int(os.getenv('DB_PORT', 4000)),
+            connect_timeout=10 # नेटवर्क को सुरक्षित रखने के लिए
         )
         cursor = db.cursor(dictionary=True)
     except Exception as e:
         print(f"❌ DB Connection Failed: {e}")
         return
 
-    # 2. Meilisearch Settings Update (Categories के साथ)
-    settings = {
-        "searchableAttributes": ["title", "original_title", "categories", "director", "cast", "description", "tagline", "slug"],
-        "filterableAttributes": ["categories", "release_year", "rating", "language", "audio_label", "quality_label", "is_series", "status", "country", "is_featured"],
-        "sortableAttributes": ["release_year", "rating", "views", "downloads", "created_at", "vote_count"],
-        "rankingRules": ["words", "typo", "proximity", "attribute", "sort", "exactness"]
-    }
-    try:
-        requests.patch(f"{MEILI_URL}/indexes/movies/settings", headers=headers, json=settings)
-        print("⚙️ Meilisearch Settings Applied (With Categories)!")
-    except Exception as e:
-        print(f"⚠️ Failed to update settings: {e}")
-
-    # 3. TiDB से डेटा निकालना (JOIN और GROUP_CONCAT के साथ)
+    # पूरी 34 फील्ड्स और Categories का JOIN
     query = """
         SELECT m.id, m.slug, m.imdb_id, m.tmdb_id, m.youtube_id, m.title, m.original_title, 
                m.description, m.tagline, m.poster_url, m.backdrop_url, m.release_date, m.release_year, 
@@ -55,49 +91,62 @@ def sync_database():
         WHERE m.is_visible = 1
         GROUP BY m.id
     """
-    cursor.execute(query)
-    movies = cursor.fetchall()
-    print(f"📦 Fetched {len(movies)} movies from TiDB. Starting upload...")
+    
+    try:
+        cursor.execute(query)
+        movies = cursor.fetchall()
+        print(f"📦 Fetched {len(movies)} movies. Starting Indexing...")
+    except Exception as e:
+        print(f"❌ Error fetching data: {e}")
+        db.close()
+        return
 
-    # 4. Data Processing & Upload in Chunks (1000-1000 का बैच)
+    # Data Processing & Upload (1000 के बैच में)
     for i in range(0, len(movies), 1000):
         chunk = movies[i:i + 1000]
         
         for m in chunk:
-            # Rating को Float बनाना
+            # 1. Rating को Float बनाएं
             m['rating'] = float(m['rating']) if m['rating'] else 0.0
             
-            # Categories की Null Value फिक्स करना
-            if m['categories'] is None:
-                m['categories'] = ""
+            # 2. Categories की Null Value फिक्स करें
+            m['categories'] = m['categories'] if m['categories'] else ""
                 
-            # Dates को String में बदलना
+            # 3. Dates को String में बदलें
             for date_field in ['release_date', 'last_air_date', 'created_at']:
                 if isinstance(m[date_field], (date, datetime)):
                     m[date_field] = m[date_field].strftime('%Y-%m-%d %H:%M:%S')
 
-        # Send Batch to Meilisearch (primaryKey=id फिक्स के साथ)
-        res = requests.post(f"{MEILI_URL}/indexes/movies/documents?primaryKey=id", headers=headers, json=chunk)
-
-        if res.status_code == 202:
-            print(f"✅ Synced chunk {i} to {i + len(chunk)}...")
-        else:
-            print(f"❌ Error syncing chunk {i}: {res.text}")
+        # Meilisearch को बैच भेजें (primaryKey=id के साथ)
+        try:
+            res = requests.post(f"{MEILI_URL}/indexes/movies/documents?primaryKey=id", headers=HEADERS, json=chunk)
+            if res.status_code == 202:
+                print(f"✅ Synced chunk {i} to {i + len(chunk)}...")
+            else:
+                print(f"❌ Error syncing chunk {i}: {res.text}")
+        except Exception as e:
+            print(f"❌ Upload crashed at chunk {i}: {e}")
             
         time.sleep(1) # CPU को ठंडा रखने के लिए 1 सेकंड का ब्रेक
 
     print("🎉 BOOM! Entire Database Sync Completed Successfully!")
     db.close()
 
-# 5. ऑटो-सिंक लूप (हर 2 घंटे में)
+# --- MAIN EXECUTION LOOP ---
 if __name__ == "__main__":
+    print("⏳ Waiting 10 seconds for Meilisearch server to boot up...")
+    time.sleep(10)
+    
+    # सबसे पहले सेटिंग्स अपडेट करो (सिर्फ 1 बार)
+    update_meilisearch_settings()
+    
+    # फिर डेटाबेस सिंक का अनंत (Infinite) लूप चलाओ
     while True:
         try:
             sync_database()
-            print("⏳ Sync cycle finished. Sleeping for 2 hours...")
+            print("😴 Sync cycle finished. Sleeping for 2 hours (7200 seconds)...")
         except Exception as e:
             print(f"⚠️ Critical error in sync cycle: {e}")
             print("⏳ Will retry in 2 hours...")
         
-        # 7200 सेकंड = 2 घंटे (अगर 1 घंटा करना हो तो 3600 लिख सकते हो)
         time.sleep(7200)
