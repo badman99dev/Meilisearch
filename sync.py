@@ -6,24 +6,15 @@ import time
 from datetime import date, datetime
 
 def sync_database():
-    print("🚀 Auto-Sync Script Started...")
+    print("\n🚀 Auto-Sync Script Started...")
     MEILI_URL = "http://localhost:7700"
     MASTER_KEY = os.getenv('MEILI_MASTER_KEY')
     headers = {'Authorization': f'Bearer {MASTER_KEY}', 'Content-Type': 'application/json'}
     
-    # 1. Meilisearch के पूरी तरह चालू होने का इंतज़ार करें (10 सेकंड)
-    time.sleep(10) 
+    # 1. Meilisearch के लिए थोड़ा इंतज़ार (ताकि सर्वर रेडी हो जाए)
+    time.sleep(5) 
 
-    # 2. चेक करें कि क्या डेटा पहले से मौजूद है?
-    try:
-        stats = requests.get(f"{MEILI_URL}/indexes/movies/stats", headers=headers).json()
-        if stats.get('numberOfDocuments', 0) > 0:
-            print("✅ Data already exists in Meilisearch. Skipping sync.")
-            return
-    except Exception as e:
-        print("Meilisearch starting up, proceeding to sync...")
-
-    print("🔄 Connecting to TiDB...")
+    print("🔄 Connecting to TiDB to fetch latest data...")
     try:
         db = mysql.connector.connect(
             host=os.getenv('DB_HOST'),
@@ -37,19 +28,20 @@ def sync_database():
         print(f"❌ DB Connection Failed: {e}")
         return
 
-    # 3. Meilisearch Settings Update (ताकि सर्च Netflix जैसी बने)
-    # 🌟 यहाँ 'categories' को Searchable और Filterable में जोड़ दिया गया है
+    # 2. Meilisearch Settings Update (Categories के साथ)
     settings = {
         "searchableAttributes": ["title", "original_title", "categories", "director", "cast", "description", "tagline", "slug"],
         "filterableAttributes": ["categories", "release_year", "rating", "language", "audio_label", "quality_label", "is_series", "status", "country", "is_featured"],
         "sortableAttributes": ["release_year", "rating", "views", "downloads", "created_at", "vote_count"],
         "rankingRules": ["words", "typo", "proximity", "attribute", "sort", "exactness"]
     }
-    requests.patch(f"{MEILI_URL}/indexes/movies/settings", headers=headers, json=settings)
-    print("⚙️ Meilisearch Settings Applied (With Categories)!")
+    try:
+        requests.patch(f"{MEILI_URL}/indexes/movies/settings", headers=headers, json=settings)
+        print("⚙️ Meilisearch Settings Applied (With Categories)!")
+    except Exception as e:
+        print(f"⚠️ Failed to update settings: {e}")
 
-    # 4. TiDB से डेटा निकालना (Heavy Columns हटा दिए गए हैं, JOIN के साथ Categories जोड़ी गई हैं)
-    # 🌟 GROUP_CONCAT से एक मूवी की सारी कैटेगरीज कॉमा (,) के साथ आ जाएंगी
+    # 3. TiDB से डेटा निकालना (JOIN और GROUP_CONCAT के साथ)
     query = """
         SELECT m.id, m.slug, m.imdb_id, m.tmdb_id, m.youtube_id, m.title, m.original_title, 
                m.description, m.tagline, m.poster_url, m.backdrop_url, m.release_date, m.release_year, 
@@ -67,15 +59,15 @@ def sync_database():
     movies = cursor.fetchall()
     print(f"📦 Fetched {len(movies)} movies from TiDB. Starting upload...")
 
-    # 5. Data Processing & Upload in Chunks (1000-1000 का बैच)
+    # 4. Data Processing & Upload in Chunks (1000-1000 का बैच)
     for i in range(0, len(movies), 1000):
         chunk = movies[i:i + 1000]
         
-        # Data Formatting: JSON में Date और Decimal सपोर्ट नहीं करता, इसलिए उन्हें सही करना होगा
         for m in chunk:
+            # Rating को Float बनाना
             m['rating'] = float(m['rating']) if m['rating'] else 0.0
             
-            # अगर किसी मूवी की कोई कैटेगरी नहीं है, तो उसे खाली स्ट्रिंग मान लें
+            # Categories की Null Value फिक्स करना
             if m['categories'] is None:
                 m['categories'] = ""
                 
@@ -84,8 +76,7 @@ def sync_database():
                 if isinstance(m[date_field], (date, datetime)):
                     m[date_field] = m[date_field].strftime('%Y-%m-%d %H:%M:%S')
 
-        # Send Batch to Meilisearch
-        # 🌟 Primary Key वाला फिक्स यहाँ मौजूद है
+        # Send Batch to Meilisearch (primaryKey=id फिक्स के साथ)
         res = requests.post(f"{MEILI_URL}/indexes/movies/documents?primaryKey=id", headers=headers, json=chunk)
 
         if res.status_code == 202:
@@ -95,8 +86,18 @@ def sync_database():
             
         time.sleep(1) # CPU को ठंडा रखने के लिए 1 सेकंड का ब्रेक
 
-    print("🎉 BOOM! Entire Database Indexed Successfully!")
+    print("🎉 BOOM! Entire Database Sync Completed Successfully!")
     db.close()
 
+# 5. ऑटो-सिंक लूप (हर 2 घंटे में)
 if __name__ == "__main__":
-    sync_database()
+    while True:
+        try:
+            sync_database()
+            print("⏳ Sync cycle finished. Sleeping for 2 hours...")
+        except Exception as e:
+            print(f"⚠️ Critical error in sync cycle: {e}")
+            print("⏳ Will retry in 2 hours...")
+        
+        # 7200 सेकंड = 2 घंटे (अगर 1 घंटा करना हो तो 3600 लिख सकते हो)
+        time.sleep(7200)
