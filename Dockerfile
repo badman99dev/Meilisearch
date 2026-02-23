@@ -1,9 +1,8 @@
-# Meilisearch का लेटेस्ट वर्शन इस्तेमाल करें
+# Meilisearch का ऑफिशियल लाइटवेट इमेज इस्तेमाल करें
 FROM getmeili/meilisearch:latest
 
-# प्रोडक्शन के लिए पोर्ट 7700 सेट करें
+# पोर्ट 7700 को एक्सपोज करें
 EXPOSE 7700
 
-# Meilisearch को रन करने की कमांड
-CMD ["./meilisearch"]
-
+# पाथ को सही करें (सिर्फ meilisearch लिखें)
+CMD ["meilisearch"]
