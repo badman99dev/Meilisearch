@@ -1,18 +1,23 @@
-# Meilisearch का ऑफिशियल इमेज
-FROM getmeili/meilisearch:latest
+# 1. Python का हल्का और स्टेबल वर्शन लें (इसमें apt-get और pip पहले से होता है)
+FROM python:3.9-slim
 
-# Python और ज़रूरी लाइब्रेरीज़ इनस्टॉल करें
-USER root
-RUN apt-get update && apt-get install -y python3 python3-pip
-RUN pip3 install mysql-connector-python requests
+# 2. Meilisearch डाउनलोड करने के लिए 'curl' इंस्टॉल करें
+RUN apt-get update && apt-get install -y curl
 
-# हमारी स्क्रिप्ट्स को कंटेनर में कॉपी करें
+# 3. Meilisearch का लेटेस्ट वर्शन डाउनलोड करें और उसे सिस्टम में सेट करें
+RUN curl -L https://install.meilisearch.com | sh
+RUN mv ./meilisearch /usr/local/bin/
+
+# 4. अपनी Python लाइब्रेरीज़ इंस्टॉल करें
+RUN pip install mysql-connector-python requests
+
+# 5. अपनी स्क्रिप्ट्स को कंटेनर में कॉपी करें
 COPY sync.py /sync.py
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
 
-# Meilisearch के लिए पोर्ट 7700
+# 6. पोर्ट 7700 खोलें
 EXPOSE 7700
 
-# सर्वर स्टार्ट होने पर start.sh चलाएं
+# 7. स्क्रिप्ट स्टार्ट करें
 CMD ["/start.sh"]
