@@ -1,8 +1,18 @@
-# Meilisearch का ऑफिशियल लाइटवेट इमेज इस्तेमाल करें
+# Meilisearch का ऑफिशियल इमेज
 FROM getmeili/meilisearch:latest
 
-# पोर्ट 7700 को एक्सपोज करें
+# Python और ज़रूरी लाइब्रेरीज़ इनस्टॉल करें
+USER root
+RUN apt-get update && apt-get install -y python3 python3-pip
+RUN pip3 install mysql-connector-python requests
+
+# हमारी स्क्रिप्ट्स को कंटेनर में कॉपी करें
+COPY sync.py /sync.py
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
+
+# Meilisearch के लिए पोर्ट 7700
 EXPOSE 7700
 
-# पाथ को सही करें (सिर्फ meilisearch लिखें)
-CMD ["meilisearch"]
+# सर्वर स्टार्ट होने पर start.sh चलाएं
+CMD ["/start.sh"]
