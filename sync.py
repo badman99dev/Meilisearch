@@ -73,7 +73,8 @@ def sync_database():
                     m[date_field] = m[date_field].strftime('%Y-%m-%d %H:%M:%S')
 
         # Send Batch to Meilisearch
-        res = requests.post(f"{MEILI_URL}/indexes/movies/documents", headers=headers, json=chunk)
+        res = requests.post(f"{MEILI_URL}/indexes/movies/documents?primaryKey=id", headers=headers, json=chunk)
+
         if res.status_code == 202:
             print(f"✅ Synced chunk {i} to {i + len(chunk)}...")
         else:
