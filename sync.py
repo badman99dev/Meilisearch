@@ -38,23 +38,30 @@ def sync_database():
         return
 
     # 3. Meilisearch Settings Update (ताकि सर्च Netflix जैसी बने)
+    # 🌟 यहाँ 'categories' को Searchable और Filterable में जोड़ दिया गया है
     settings = {
-        "searchableAttributes": ["title", "original_title", "director", "cast", "description", "tagline", "slug"],
-        "filterableAttributes": ["release_year", "rating", "language", "audio_label", "quality_label", "is_series", "status", "country", "is_featured"],
+        "searchableAttributes": ["title", "original_title", "categories", "director", "cast", "description", "tagline", "slug"],
+        "filterableAttributes": ["categories", "release_year", "rating", "language", "audio_label", "quality_label", "is_series", "status", "country", "is_featured"],
         "sortableAttributes": ["release_year", "rating", "views", "downloads", "created_at", "vote_count"],
         "rankingRules": ["words", "typo", "proximity", "attribute", "sort", "exactness"]
     }
     requests.patch(f"{MEILI_URL}/indexes/movies/settings", headers=headers, json=settings)
-    print("⚙️ Meilisearch Settings Applied!")
+    print("⚙️ Meilisearch Settings Applied (With Categories)!")
 
-    # 4. TiDB से डेटा निकालना (Heavy Columns हटा दिए गए हैं)
+    # 4. TiDB से डेटा निकालना (Heavy Columns हटा दिए गए हैं, JOIN के साथ Categories जोड़ी गई हैं)
+    # 🌟 GROUP_CONCAT से एक मूवी की सारी कैटेगरीज कॉमा (,) के साथ आ जाएंगी
     query = """
-        SELECT id, slug, imdb_id, tmdb_id, youtube_id, title, original_title, description, tagline, 
-               poster_url, backdrop_url, release_date, release_year, runtime, status, language, country, 
-               is_series, total_seasons, total_episodes, last_air_date, quality_label, audio_label, 
-               subtitle_label, rating, vote_count, views, downloads, is_featured, is_visible, 
-               director, cast, created_at
-        FROM movies WHERE is_visible = 1
+        SELECT m.id, m.slug, m.imdb_id, m.tmdb_id, m.youtube_id, m.title, m.original_title, 
+               m.description, m.tagline, m.poster_url, m.backdrop_url, m.release_date, m.release_year, 
+               m.runtime, m.status, m.language, m.country, m.is_series, m.total_seasons, m.total_episodes, 
+               m.last_air_date, m.quality_label, m.audio_label, m.subtitle_label, m.rating, m.vote_count, 
+               m.views, m.downloads, m.is_featured, m.is_visible, m.director, m.cast, m.created_at,
+               GROUP_CONCAT(c.category_name SEPARATOR ', ') as categories
+        FROM movies m
+        LEFT JOIN movie_categories mc ON m.id = mc.movie_id
+        LEFT JOIN categories c ON mc.category_id = c.id
+        WHERE m.is_visible = 1
+        GROUP BY m.id
     """
     cursor.execute(query)
     movies = cursor.fetchall()
@@ -67,12 +74,18 @@ def sync_database():
         # Data Formatting: JSON में Date और Decimal सपोर्ट नहीं करता, इसलिए उन्हें सही करना होगा
         for m in chunk:
             m['rating'] = float(m['rating']) if m['rating'] else 0.0
+            
+            # अगर किसी मूवी की कोई कैटेगरी नहीं है, तो उसे खाली स्ट्रिंग मान लें
+            if m['categories'] is None:
+                m['categories'] = ""
+                
             # Dates को String में बदलना
             for date_field in ['release_date', 'last_air_date', 'created_at']:
                 if isinstance(m[date_field], (date, datetime)):
                     m[date_field] = m[date_field].strftime('%Y-%m-%d %H:%M:%S')
 
         # Send Batch to Meilisearch
+        # 🌟 Primary Key वाला फिक्स यहाँ मौजूद है
         res = requests.post(f"{MEILI_URL}/indexes/movies/documents?primaryKey=id", headers=headers, json=chunk)
 
         if res.status_code == 202:
@@ -87,4 +100,3 @@ def sync_database():
 
 if __name__ == "__main__":
     sync_database()
-  
