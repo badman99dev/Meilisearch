@@ -16,15 +16,25 @@ def update_meilisearch_settings():
     print("⚙️ Applying Enterprise-Grade Settings to Meilisearch...")
 
     settings = {
-        # 1. सर्च के लिए (प्राथमिकता के अनुसार)
+        # 1. सर्च के लिए (प्राथमिकता के अनुसार - NEW FIELDS ADDED)
         "searchableAttributes": [
-            "title", "original_title", "categories", "director", "cast", "tagline", "description", "slug"
+            "title", 
+            "original_title", 
+            "cast", 
+            "categories", 
+            "keywords", 
+            "production_companies", 
+            "director", 
+            "tagline", 
+            "description", 
+            "slug"
         ],
 
-        # 2. फिल्टर करने के लिए
+        # 2. फिल्टर करने के लिए (NEW FIELDS ADDED)
         "filterableAttributes": [
             "categories", "release_year", "rating", "language", "audio_label", 
-            "quality_label", "is_series", "status", "country", "is_featured"
+            "quality_label", "is_series", "status", "country", "is_featured",
+            "keywords", "production_companies"
         ],
 
         # 3. सॉर्ट करने के लिए
@@ -78,17 +88,19 @@ def sync_database():
         print(f"❌ DB Connection Failed: {e}")
         return
 
-    # 🔥 UPDATED QUERY: Hidden Categories & Empty Links Filter Added
+    # 🔥 UPDATED QUERY: Hidden Categories, Empty Links Filter & Meta Data (Keywords/Companies) Added
     query = """
         SELECT m.id, m.slug, m.imdb_id, m.tmdb_id, m.youtube_id, m.title, m.original_title, 
                m.description, m.tagline, m.poster_url, m.backdrop_url, m.release_date, m.release_year, 
                m.runtime, m.status, m.language, m.country, m.is_series, m.total_seasons, m.total_episodes, 
                m.last_air_date, m.quality_label, m.audio_label, m.subtitle_label, m.rating, m.vote_count, 
                m.views, m.downloads, m.is_featured, m.is_visible, m.director, m.cast, m.created_at,
-               GROUP_CONCAT(c.category_name SEPARATOR ', ') as categories
+               GROUP_CONCAT(DISTINCT c.category_name SEPARATOR ', ') as categories,
+               mm.keywords, mm.production_companies
         FROM movies m
         LEFT JOIN movie_categories mc ON m.id = mc.movie_id
         LEFT JOIN categories c ON mc.category_id = c.id
+        LEFT JOIN movie_meta mm ON m.id = mm.movie_id
         WHERE m.is_visible = 1
         
         -- 🛑 1. Hidden Category Logic (अगर केटेगरी छिपी है, तो मूवी भी मत दिखाओ)
@@ -112,7 +124,7 @@ def sync_database():
     try:
         cursor.execute(query)
         movies = cursor.fetchall()
-        print(f"📦 Fetched {len(movies)} Valid Movies (Filtered Hidden/Empty). Starting Indexing...")
+        print(f"📦 Fetched {len(movies)} Valid Movies. Starting Indexing...")
     except Exception as e:
         print(f"❌ Error fetching data: {e}")
         db.close()
@@ -126,8 +138,14 @@ def sync_database():
             # 1. Rating को Float बनाएं
             m['rating'] = float(m['rating']) if m['rating'] else 0.0
 
-            # 2. Categories की Null Value फिक्स करें
-            m['categories'] = m['categories'] if m['categories'] else ""
+            # 🔥 2. COMMA-SEPARATED STRINGS TO ARRAYS (Safe handling for NULLs)
+            array_fields = ['categories', 'keywords', 'production_companies', 'cast', 'director']
+            for field in array_fields:
+                if m.get(field): # अगर डेटा है (Null या Empty नहीं है)
+                    # कॉमा से तोड़कर, स्पेस हटाकर Array (List) बना दो
+                    m[field] = [item.strip() for item in str(m[field]).split(',') if item.strip()]
+                else:
+                    m[field] = [] # अगर Null है तो Empty Array भेज दो, ताकि Error ना आये
 
             # 3. Dates को String में बदलें
             for date_field in ['release_date', 'last_air_date', 'created_at']:
