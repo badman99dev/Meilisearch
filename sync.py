@@ -24,7 +24,7 @@ def update_meilisearch_settings():
         # 2. फिल्टर करने के लिए
         "filterableAttributes": [
             "categories", "release_year", "rating", "language", "audio_label", 
-            "quality_label", "is_series", "status", "country", "is_featured"
+            "quality_label", "is_series", "stream_avl", "poster_moderation"
         ],
 
         # 3. सॉर्ट करने के लिए
@@ -82,9 +82,10 @@ def sync_database():
     query = """
         SELECT m.id, m.slug, m.imdb_id, m.tmdb_id, m.youtube_id, m.title, m.original_title, 
                m.description, m.tagline, m.poster_url, m.backdrop_url, m.release_date, m.release_year, 
-               m.runtime, m.status, m.language, m.country, m.is_series, m.total_seasons, m.total_episodes, 
+               m.runtime, m.language, m.is_series, m.total_seasons, m.total_episodes, 
                m.last_air_date, m.quality_label, m.audio_label, m.subtitle_label, m.rating, m.vote_count, 
-               m.views, m.downloads, m.is_featured, m.is_visible, m.director, m.cast, m.created_at,
+               m.views, m.downloads, m.is_visible, m.director, m.cast, m.created_at,
+               m.content_moderation, m.master_url,
                GROUP_CONCAT(c.category_name SEPARATOR ', ') as categories
         FROM movies m
         LEFT JOIN movie_categories mc ON m.id = mc.movie_id
@@ -123,16 +124,24 @@ def sync_database():
         chunk = movies[i:i + 1000]
 
         for m in chunk:
-            # 1. Rating को Float बनाएं
             m['rating'] = float(m['rating']) if m['rating'] else 0.0
-
-            # 2. Categories की Null Value फिक्स करें
             m['categories'] = m['categories'] if m['categories'] else ""
 
-            # 3. Dates को String में बदलें
             for date_field in ['release_date', 'last_air_date', 'created_at']:
                 if isinstance(m[date_field], (date, datetime)):
                     m[date_field] = m[date_field].strftime('%Y-%m-%d %H:%M:%S')
+
+            try:
+                cm = json.loads(m.get('content_moderation') or '{}')
+                m['poster_moderation'] = cm.get('poster', 'safe')
+            except:
+                m['poster_moderation'] = 'safe'
+
+            m['stream_avl'] = bool(m.get('master_url') and str(m['master_url']).startswith('http'))
+
+            m.pop('content_moderation', None)
+            m.pop('master_url', None)
+            m.pop('is_visible', None)
 
         # Meilisearch को बैच भेजें (primaryKey=id के साथ)
         try:
